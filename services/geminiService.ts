@@ -1,0 +1,123 @@
+import { GoogleGenAI, Modality, Part } from "@google/genai";
+import type { GenerateContentResponse } from "@google/genai";
+import type { UploadedImage, BackgroundSource } from "../types";
+
+const API_KEY = process.env.API_KEY;
+
+if (!API_KEY) {
+    throw new Error("API_KEY environment variable is not set.");
+}
+
+const ai = new GoogleGenAI({ apiKey: API_KEY });
+const model = 'gemini-2.5-flash-image-preview';
+
+const fileToGenerativePart = (image: UploadedImage): Part => {
+  return {
+    inlineData: {
+      data: image.base64,
+      mimeType: image.file.type,
+    },
+  };
+};
+
+export const generateTryOnImage = async (
+  userImage: UploadedImage,
+  clothingImage: UploadedImage,
+  view: string,
+  customDirectives: string,
+  backgroundSource: BackgroundSource,
+  isRegeneration: boolean = false
+): Promise<string> => {
+  try {
+    let prompt = `You are a world-class virtual fashion assistant. Your MOST IMPORTANT and PRIMARY task is to perform a hyper-realistic virtual try-on while **perfectly preserving the identity of the person in the photo.**
+
+**Core Rule: Identity Preservation is MANDATORY.**
+- The person's face, hair, body shape, and skin tone in the output image **MUST BE IDENTICAL** to the original 'person' image.
+- **DO NOT** alter their facial features, age, or ethnicity. This is the highest priority instruction.
+
+**Task Instructions:**
+1.  Take the clothing item from the 'clothing' image and flawlessly dress the person from the 'person' image with it.
+2.  **Pose & Orientation:**`;
+    
+    switch (view) {
+      case 'front':
+      case 'side':
+      case 'back':
+        prompt += `\n    - For a '${view}' view, the person's pose and orientation (which way they are facing) must match the original 'person' image. Default to a neutral, standing pose unless a different pose is specified in the directives.`;
+        break;
+      case 'walking':
+        prompt += `\n    - Generate a dynamic but natural 'walking' pose. The person should look like they are taking a step forward.`;
+        break;
+      case 'hero':
+        prompt += `\n    - Generate a confident 'hero' pose. The person could be standing tall with hands on hips or another strong, assertive stance.`;
+        break;
+      case 'casual':
+         prompt += `\n    - Generate a relaxed 'casual' pose. The person could have a hand in their pocket, be leaning slightly, or another natural, unstaged pose.`;
+         break;
+      default:
+         prompt += `\n    - Be creative and follow the user's directives for the pose. If none, generate an interesting dynamic pose.`;
+         break;
+    }
+
+    prompt += `
+3.  The final output must be a single, high-quality, photorealistic image.
+4.  Ensure the fit, lighting, shadows, and perspective on the clothing are natural and consistent.`;
+
+    switch (backgroundSource) {
+        case 'user':
+            prompt += "\n5.  **Background Requirement:** Use the exact background from the 'person' image.";
+            break;
+        case 'clothing':
+            prompt += "\n5.  **Background Requirement:** Use the exact background from the 'clothing' image.";
+            break;
+        case 'auto':
+        default:
+            prompt += "\n5.  **Background Requirement:** Generate a simple, clean, and complementary background that makes the person and clothing stand out.";
+            break;
+    }
+
+    if (customDirectives) {
+        prompt += `\n6.  **Creative Directives:** You MUST incorporate the following user-specified directives, especially for changes in pose, lighting, and clothing color: "${customDirectives}".`;
+    }
+
+    if (isRegeneration) {
+        prompt += `\n\n**Important Regeneration Directive:** This is a request to regenerate the image. You MUST produce a new, distinctly different variation from any previous attempts for this '${view}' view. Do not generate the same image again. Introduce a creative variation while respecting all other core instructions.`;
+    }
+
+    prompt += "\n\n**Output Format:** Only return the final image. Do not include any text, descriptions, or commentary."
+
+    const userImagePart = fileToGenerativePart(userImage);
+    const clothingImagePart = fileToGenerativePart(clothingImage);
+
+    const response: GenerateContentResponse = await ai.models.generateContent({
+        model: model,
+        contents: {
+            parts: [
+                { text: "person:" },
+                userImagePart,
+                { text: "clothing:" },
+                clothingImagePart,
+                { text: prompt },
+            ],
+        },
+        config: {
+            responseModalities: [Modality.IMAGE, Modality.TEXT],
+        },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+        if (part.inlineData?.data) {
+            return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+        }
+    }
+
+    throw new Error('No image was generated by the API. The model may not have been able to process the request.');
+  } catch (error) {
+    console.error('Error generating try-on image:', error);
+    let message = 'An unknown error occurred while contacting the Gemini API.';
+    if(error instanceof Error) {
+        message = `API Error: ${error.message}`;
+    }
+    throw new Error(message);
+  }
+};
